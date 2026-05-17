@@ -23,7 +23,6 @@ New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
 $literalFiles = @(
   'sync_backend.py',
   'launch_ui.ps1',
-  'package_release.ps1',
   'LICENSE'
 )
 
@@ -32,19 +31,16 @@ foreach ($file in $literalFiles) {
 }
 
 Get-ChildItem -LiteralPath $root -File -Filter '*.cmd' |
+  Where-Object { $_.Name -notin @('launch_ui.cmd', 'Start-Codex-History-Sync.cmd') } |
   Copy-Item -Destination $stagingDir -Force
 
 Get-ChildItem -LiteralPath $root -File -Filter '*.md' |
+  Where-Object { $_.Name -ne 'README.md' } |
   Copy-Item -Destination $stagingDir -Force
 
 $docsSource = Join-Path $root 'docs'
 if (Test-Path -LiteralPath $docsSource) {
   Copy-Item -LiteralPath $docsSource -Destination $stagingDir -Recurse -Force
-}
-
-$testsSource = Join-Path $root 'tests'
-if (Test-Path -LiteralPath $testsSource) {
-  Copy-Item -LiteralPath $testsSource -Destination $stagingDir -Recurse -Force
 }
 
 Get-ChildItem -LiteralPath $stagingDir -Directory -Recurse -Filter '__pycache__' |

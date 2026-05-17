@@ -42,7 +42,7 @@
 powershell -NoProfile -ExecutionPolicy Bypass -File .\launch_ui.ps1
 ```
 
-也可以双击 `Start-Codex-History-Provider-Sync.cmd`。兼容入口 `Start-Codex-History-Sync.cmd` 和 `双击启动.cmd` 也会保留。
+也可以双击 `Start-Codex-History-Provider-Sync.cmd`。中文入口 `双击启动.cmd` 也会保留。发布压缩包里的普通用户说明是 `使用说明.md`。
 
 ### 创建桌面快捷方式
 
