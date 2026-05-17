@@ -12,10 +12,37 @@ Add-Type -AssemblyName System.Drawing
 $script:UiScriptPath = $MyInvocation.MyCommand.Path
 $script:ToolRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:BackendPath = Join-Path $script:ToolRoot 'sync_backend.py'
-$script:ShortcutName = 'Codex 对话同步工具.lnk'
+$script:LauncherCmdPath = Join-Path $script:ToolRoot 'launch_ui.cmd'
+$script:ShortcutName = 'Codex History Provider Sync.lnk'
 $script:IconLocation = 'C:\Windows\System32\imageres.dll,15'
 $script:BackupMap = @{}
 $script:LatestState = $null
+$script:PythonCommand = $null
+
+function Get-PythonCommand {
+  if ($script:PythonCommand) {
+    return $script:PythonCommand
+  }
+
+  $candidates = @(
+    @{ File = 'py'; Args = @('-3') },
+    @{ File = 'python'; Args = @() },
+    @{ File = 'python3'; Args = @() }
+  )
+
+  foreach ($candidate in $candidates) {
+    if (-not (Get-Command $candidate.File -ErrorAction SilentlyContinue)) {
+      continue
+    }
+    $probeOutput = & $candidate.File @($candidate.Args) --version 2>&1
+    if ($LASTEXITCODE -eq 0 -and "$probeOutput" -match 'Python\s+3\.') {
+      $script:PythonCommand = $candidate
+      return $script:PythonCommand
+    }
+  }
+
+  throw '未找到 Python 3。请先安装 Python 3，然后重新打开本工具。'
+}
 
 function Invoke-Backend {
   param(
@@ -27,7 +54,8 @@ function Invoke-Backend {
     throw "缺少后端脚本: $script:BackendPath"
   }
 
-  $output = & py -3 $script:BackendPath @Arguments 2>&1
+  $python = Get-PythonCommand
+  $output = & $python.File @($python.Args) $script:BackendPath @Arguments 2>&1
   $exitCode = $LASTEXITCODE
   $text = (($output | ForEach-Object { "$_" }) -join [Environment]::NewLine).Trim()
   if (-not $text) {
@@ -51,24 +79,54 @@ function Invoke-Backend {
 }
 
 function New-DesktopShortcut {
+  $launcherPath = Ensure-LauncherCmd
   $desktopPath = [Environment]::GetFolderPath('Desktop')
   $shortcutPath = Join-Path $desktopPath $script:ShortcutName
-  $targetPath = Join-Path $PSHOME 'powershell.exe'
-  $arguments = "-NoProfile -ExecutionPolicy Bypass -Sta -WindowStyle Hidden -File `"$script:UiScriptPath`""
 
   $shell = New-Object -ComObject WScript.Shell
   $shortcut = $shell.CreateShortcut($shortcutPath)
-  $shortcut.TargetPath = $targetPath
-  $shortcut.Arguments = $arguments
+  $shortcut.TargetPath = $launcherPath
+  $shortcut.Arguments = ''
   $shortcut.WorkingDirectory = $script:ToolRoot
   $shortcut.IconLocation = $script:IconLocation
-  $shortcut.Description = 'Codex history sync UI'
+  $shortcut.Description = 'Codex History Provider Sync'
   $shortcut.Save()
 
   return $shortcutPath
 }
 
+function Ensure-LauncherCmd {
+  $cmdContent = @"
+@echo off
+setlocal
+set "SCRIPT_DIR=%~dp0"
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Sta -File "%SCRIPT_DIR%launch_ui.ps1" %*
+set "EXITCODE=%ERRORLEVEL%"
+if not "%EXITCODE%"=="0" (
+  echo.
+  echo Launch failed. Exit code: %EXITCODE%
+  echo.
+  echo If Python is missing, install Python 3 first:
+  echo https://www.python.org/downloads/windows/
+  echo.
+  pause
+)
+"@
+
+  $currentContent = $null
+  if (Test-Path -LiteralPath $script:LauncherCmdPath) {
+    $currentContent = [System.IO.File]::ReadAllText($script:LauncherCmdPath)
+  }
+
+  if ($currentContent -cne $cmdContent) {
+    [System.IO.File]::WriteAllText($script:LauncherCmdPath, $cmdContent, [System.Text.UTF8Encoding]::new($false))
+  }
+
+  return $script:LauncherCmdPath
+}
+
 if ($InstallShortcutOnly) {
+  [void](Ensure-LauncherCmd)
   $createdShortcut = New-DesktopShortcut
   Write-Output "桌面快捷方式已创建: $createdShortcut"
   exit 0
@@ -228,8 +286,14 @@ function Confirm-Action {
   return $choice -eq [System.Windows.Forms.DialogResult]::OK
 }
 
+if ($SmokeTest) {
+  $launcherPath = Ensure-LauncherCmd
+  Write-Output "Smoke test OK: $launcherPath"
+  exit 0
+}
+
 $form = New-Object System.Windows.Forms.Form
-$form.Text = 'Codex 历史找回助手'
+$form.Text = 'Codex History Provider Sync'
 $form.StartPosition = 'CenterScreen'
 $form.Size = New-Object System.Drawing.Size(920, 700)
 $form.MinimumSize = New-Object System.Drawing.Size(920, 700)
@@ -237,14 +301,14 @@ $form.BackColor = [System.Drawing.Color]::FromArgb(246, 248, 251)
 $form.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9)
 
 $headerLabel = New-Object System.Windows.Forms.Label
-$headerLabel.Text = 'Codex 历史找回助手'
+$headerLabel.Text = 'Codex History Provider Sync'
 $headerLabel.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 18, [System.Drawing.FontStyle]::Bold)
 $headerLabel.AutoSize = $true
 $headerLabel.Location = New-Object System.Drawing.Point(24, 18)
 $form.Controls.Add($headerLabel)
 
 $introLabel = New-Object System.Windows.Forms.Label
-$introLabel.Text = '用于把“换了 API / Provider / 登录方式后看不见的本地历史”重新挂回当前 Codex。Codex 开着也可以试，工具会等待数据库空闲。'
+$introLabel.Text = '用于把“换了 API / Provider / 模型 / 登录方式后看不见的本地历史”重新挂回当前 Codex。Codex 开着也可以试，工具会等待数据库空闲。'
 $introLabel.ForeColor = [System.Drawing.Color]::FromArgb(77, 89, 105)
 $introLabel.AutoSize = $true
 $introLabel.MaximumSize = New-Object System.Drawing.Size(850, 0)
@@ -304,7 +368,7 @@ $refreshButton.Location = New-Object System.Drawing.Point(28, 286)
 $form.Controls.Add($refreshButton)
 
 $syncButton = New-Object System.Windows.Forms.Button
-$syncButton.Text = '开始找回历史'
+$syncButton.Text = '同步历史归属'
 $syncButton.Size = New-Object System.Drawing.Size(150, 36)
 $syncButton.Location = New-Object System.Drawing.Point(150, 286)
 $syncButton.BackColor = [System.Drawing.Color]::FromArgb(32, 91, 177)
@@ -400,7 +464,7 @@ $syncButton.Add_Click({
       return
     }
     $message = "将把旧账号/Provider/模型下的本地历史挂回当前设置：`r`nProvider: $($script:LatestState.current_provider)`r`n模型: $($script:LatestState.current_model)`r`n`r`n本次预计处理：$($script:LatestState.movable_threads) 项`r`n包含数据库记录、会话文件和侧边栏索引。`r`n`r`n工具会先自动备份。Codex 正在运行也可以，但如果它正在写入历史，可能会等待几秒。"
-    if (-not (Confirm-Action -Message $message -Title '开始找回历史？')) {
+    if (-not (Confirm-Action -Message $message -Title '确认同步历史？')) {
       Append-Log '用户取消了同步。'
       return
     }
@@ -526,6 +590,8 @@ $restoreLatestButton.Add_Click({
 })
 
 try {
+  $launcherPath = Ensure-LauncherCmd
+  Append-Log "启动器已准备好: $launcherPath"
   $createdShortcut = New-DesktopShortcut
   Append-Log "桌面入口已准备好: $createdShortcut"
 } catch {
@@ -537,11 +603,6 @@ try {
 } catch {
   Append-Log "初始化状态失败: $($_.Exception.Message)"
   [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '启动失败', 'OK', 'Error') | Out-Null
-}
-
-if ($SmokeTest) {
-  Write-Output 'Smoke test OK'
-  exit 0
 }
 
 [void]$form.ShowDialog()

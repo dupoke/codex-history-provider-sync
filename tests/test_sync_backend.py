@@ -16,8 +16,19 @@ def write_config(codex_home, provider: str = "new_provider", model: str = "gpt-n
     )
 
 
-def create_threads_db(codex_home, *, with_model: bool = True) -> None:
-    conn = sqlite3.connect(codex_home / "state_5.sqlite")
+def write_config_without_model_provider(codex_home, model: str = "gpt-new") -> None:
+    (codex_home / "config.toml").write_text(
+        f'model = "{model}"\n[model_providers.OpenAI]\nname = "OpenAI"\n',
+        encoding="utf-8",
+    )
+
+
+def write_chatgpt_auth(codex_home) -> None:
+    (codex_home / "auth.json").write_text('{"auth_mode":"chatgpt"}\n', encoding="utf-8")
+
+
+def create_threads_db(codex_home, *, with_model: bool = True, db_name: str = "state_5.sqlite") -> None:
+    conn = sqlite3.connect(codex_home / db_name)
     if with_model:
         conn.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT NOT NULL, model TEXT)")
         conn.executemany(
@@ -89,6 +100,30 @@ class SyncBackendTests(unittest.TestCase):
                 rows = conn.execute("SELECT model_provider, COUNT(*) FROM threads GROUP BY model_provider").fetchall()
 
             self.assertEqual(rows, [("new_provider", 2)])
+
+    def test_status_uses_newest_state_database_when_state_5_is_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir)
+            write_config(codex_home)
+            create_threads_db(codex_home, db_name="state_6.sqlite")
+            paths = resolve_paths(str(codex_home))
+
+            status = get_status(paths)
+
+            self.assertEqual(paths.db_path.name, "state_6.sqlite")
+            self.assertEqual(status["db_path"], str(codex_home / "state_6.sqlite"))
+
+    def test_status_can_infer_openai_provider_from_auth_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            codex_home = Path(temp_dir)
+            write_config_without_model_provider(codex_home)
+            write_chatgpt_auth(codex_home)
+            create_threads_db(codex_home, with_model=True)
+            paths = resolve_paths(str(codex_home))
+
+            status = get_status(paths)
+
+            self.assertEqual(status["current_provider"], "OpenAI")
 
     def test_restore_backup_restores_previous_database_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

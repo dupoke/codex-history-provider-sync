@@ -47,12 +47,30 @@ class SessionRecord:
     model: str | None
 
 
+def detect_db_path(home: Path) -> Path:
+    explicit = home / "state_5.sqlite"
+    if explicit.exists():
+        return explicit
+
+    candidates = []
+    for candidate in home.glob("state_*.sqlite"):
+        match = re.fullmatch(r"state_(\d+)\.sqlite", candidate.name)
+        if match:
+            candidates.append((int(match.group(1)), candidate))
+
+    if candidates:
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+
+    return explicit
+
+
 def resolve_paths(codex_home: str | None) -> Paths:
     home = Path(codex_home).expanduser() if codex_home else default_codex_home()
     return Paths(
         codex_home=home,
         config_path=home / "config.toml",
-        db_path=home / "state_5.sqlite",
+        db_path=detect_db_path(home),
         backup_dir=home / "history_sync_backups",
         session_index_path=home / "session_index.jsonl",
         sessions_dir=home / "sessions",
@@ -99,11 +117,63 @@ def write_text_exact(path: Path, text: str) -> None:
             temp_path.unlink()
 
 
-def parse_current_provider(config_text: str) -> str:
+def parse_current_provider_from_config(config_text: str) -> str | None:
     match = re.search(r'(?m)^\s*model_provider\s*=\s*"([^"]+)"', config_text)
-    if not match:
-        raise RuntimeError("Could not find model_provider in config.toml.")
-    return match.group(1)
+    return match.group(1) if match else None
+
+
+def parse_configured_provider_names(config_text: str) -> list[str]:
+    return re.findall(r'(?m)^\s*\[model_providers\.([^\]\r\n]+)\]\s*$', config_text)
+
+
+def choose_provider_name(config_text: str, *preferred_names: str) -> str | None:
+    configured_names = parse_configured_provider_names(config_text)
+    if not configured_names:
+        return None
+
+    by_lower = {name.lower(): name for name in configured_names}
+    for preferred in preferred_names:
+        if preferred and preferred.lower() in by_lower:
+            return by_lower[preferred.lower()]
+
+    if len(configured_names) == 1:
+        return configured_names[0]
+
+    return None
+
+
+def parse_provider_from_auth(paths: Paths, config_text: str) -> str | None:
+    auth_path = paths.codex_home / "auth.json"
+    if not auth_path.exists():
+        return None
+
+    try:
+        auth_data = json.loads(read_text(auth_path))
+    except Exception:
+        return None
+
+    auth_mode = auth_data.get("auth_mode")
+    tokens = auth_data.get("tokens") or {}
+
+    if auth_mode == "chatgpt":
+        return choose_provider_name(config_text, "OpenAI", "openai") or "openai"
+    if auth_data.get("OPENAI_API_KEY"):
+        return choose_provider_name(config_text, "OpenAI", "openai") or "openai"
+    if isinstance(tokens, dict) and (tokens.get("access_token") or tokens.get("refresh_token")):
+        return choose_provider_name(config_text, "OpenAI", "openai") or "openai"
+    return None
+
+
+def infer_current_provider(paths: Paths, config_text: str) -> str:
+    provider = parse_current_provider_from_config(config_text)
+    if provider:
+        return provider
+
+    provider = parse_provider_from_auth(paths, config_text)
+    if provider:
+        return provider
+
+    raise RuntimeError("Could not determine model_provider from config.toml or auth.json.")
 
 
 def parse_current_model(config_text: str) -> str | None:
@@ -248,7 +318,7 @@ def list_backups(paths: Paths, limit: int = 20) -> list[dict[str, str]]:
     if not paths.backup_dir.exists():
         return []
     files = sorted(
-        paths.backup_dir.glob("state_5.sqlite.*.bak"),
+        paths.backup_dir.glob("state_*.sqlite.*.bak"),
         key=lambda item: item.stat().st_mtime,
         reverse=True,
     )
@@ -662,7 +732,7 @@ def restore_database_with_retry(paths: Paths, chosen_backup: Path) -> dict[str, 
 def get_status(paths: Paths) -> dict[str, object]:
     ensure_environment(paths)
     config_text = read_text(paths.config_path)
-    current_provider = parse_current_provider(config_text)
+    current_provider = infer_current_provider(paths, config_text)
     current_model = parse_current_model(config_text)
     session_records = scan_session_records(paths)
     session_provider_counts = ordered_counts([record.model_provider for record in session_records])
@@ -729,7 +799,7 @@ def make_backup(paths: Paths, label: str) -> Path:
     ensure_environment(paths)
     paths.backup_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    backup_path = paths.backup_dir / f"state_5.sqlite.{label}.{timestamp}.bak"
+    backup_path = paths.backup_dir / f"{paths.db_path.name}.{label}.{timestamp}.bak"
     with connect_db(paths.db_path, readonly=True) as source, connect_db(backup_path, readonly=False) as target:
         source.backup(target)
     snapshot_metadata(paths, backup_path)
@@ -847,7 +917,7 @@ def to_json(payload: dict[str, object]) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Codex history sync helper")
+    parser = argparse.ArgumentParser(description="Codex History Provider Sync backend")
     parser.add_argument("--codex-home", help="Override Codex home directory")
     parser.add_argument("--json", action="store_true", help="Emit JSON output")
 
